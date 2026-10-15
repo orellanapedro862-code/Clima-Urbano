@@ -12,7 +12,7 @@ Tudo na tela vem de APIs gratuitas, sem chave:
   - Open-Meteo Geocoding : busca de cidade
   - Nominatim (OSM)      : nome da cidade/UF a partir das coordenadas
   - OpenStreetMap        : mapa
-  - ipwho.is             : localização aproximada pelo IP
+  - streamlit-js-eval    : GPS real do aparelho (navigator.geolocation do navegador)
 """
 
 from __future__ import annotations
@@ -100,16 +100,6 @@ def hour_index(times: list[str], now_iso: str) -> int:
 # ----------------------------------------------------------------------------
 # APIs
 # ----------------------------------------------------------------------------
-def locate_by_ip() -> dict | None:
-    try:
-        d = requests.get("https://ipwho.is/", timeout=10).json()
-        if not d.get("success"):
-            return None
-        return {"latitude": d["latitude"], "longitude": d["longitude"], "accuracy": 5000}
-    except Exception:
-        return None
-
-
 def reverse_geocode(lat: float, lon: float) -> tuple[str, str] | None:
     try:
         r = requests.get(
@@ -460,6 +450,19 @@ border-radius:.9rem;background:var(--canvas);padding:.8rem}
 .footer{border-top:1px solid var(--line);background:var(--surface);margin-top:2.5rem;padding:1.5rem;
 display:flex;justify-content:space-between;flex-wrap:wrap;gap:.5rem;font-size:.75rem;color:var(--subtle)}
 div.stButton>button{border-radius:.75rem;font-weight:700;font-size:.75rem}
+@media (max-width:640px){
+ .block-container{padding-left:1rem!important;padding-right:1rem!important}
+ .topbar{padding:.7rem .9rem;margin-bottom:1.25rem}
+ h1.hello{font-size:1.6rem}
+ .lead{font-size:.85rem}
+ .upd{text-align:left}
+ .stats{gap:.9rem;flex-wrap:wrap}
+ .chart{height:12rem}
+ .chart .hours{font-size:.65rem}
+ .mt-val strong{font-size:1.6rem}
+ .fc{gap:.6rem;padding:.7rem .5rem}
+ .footer{padding:1.2rem 1rem}
+}
 div.stButton>button[kind="primary"]{background:var(--brand);border-color:var(--brand);color:#fff;
 box-shadow:0 8px 20px rgb(25 118 87/22%)}
 </style>
@@ -676,6 +679,7 @@ def init_state() -> None:
     ss.setdefault("dismissed_alert", None)
     ss.setdefault("location", dict(DEFAULT_LOCATION))
     ss.setdefault("location_status", "idle")  # idle | active | unavailable
+    ss.setdefault("want_gps", False)
     ss.setdefault("just_refreshed", False)
     ss.setdefault("geo_results", [])
     ss.setdefault("data", None)
@@ -683,20 +687,30 @@ def init_state() -> None:
     ss.setdefault("next_refresh_at", time.time())
 
 
-def request_location() -> None:
+def process_gps() -> None:
+    """Pede ao navegador a posição real (GPS). Roda enquanto want_gps estiver ativo."""
     ss = st.session_state
-    with st.spinner("Obtendo localização..."):
-        pos = locate_by_ip()
-        if not pos:
-            ss.location_status = "unavailable"
-            return
-        loc = dict(ss.location)
-        loc.update(latitude=pos["latitude"], longitude=pos["longitude"],
-                   accuracy=pos["accuracy"], source="ip")
-        place = reverse_geocode(loc["latitude"], loc["longitude"])
-        if place:
-            loc["city"], loc["region"] = place[0], place[1] or loc["region"]
-        ss.location, ss.location_status = loc, "active"
+    try:
+        from streamlit_js_eval import get_geolocation
+    except ImportError:
+        ss.want_gps, ss.location_status = False, "unavailable"
+        return
+    res = get_geolocation()  # None enquanto o usuário não responde ao pedido de permissão
+    if not res:
+        return
+    ss.want_gps = False
+    coords = res.get("coords") if isinstance(res, dict) else None
+    if not coords or coords.get("latitude") is None:
+        ss.location_status = "unavailable"
+        return
+    loc = dict(ss.location)
+    loc.update(latitude=coords["latitude"], longitude=coords["longitude"],
+               accuracy=coords.get("accuracy"), source="gps")
+    place = reverse_geocode(loc["latitude"], loc["longitude"])
+    if place:
+        loc["city"], loc["region"] = place[0], place[1] or loc["region"]
+    ss.location, ss.location_status = loc, "active"
+    st.rerun()
 
 
 def apply_geo_choice() -> None:
@@ -722,8 +736,8 @@ def main() -> None:
     st.markdown(CSS, unsafe_allow_html=True)
     components.html(UI_BRIDGE, height=0)
 
-    if ss.location_status == "idle":
-        request_location()
+    if ss.want_gps:
+        process_gps()
     loc = ss.location
 
     # Carrega dados reais (cache de 10 min por coordenada)
@@ -743,7 +757,7 @@ def main() -> None:
         <span><b>Clima Urbano</b><small>Estação inteligente</small></span></div>
         <span class="nav-active">Visão geral</span></div>""", unsafe_allow_html=True)
 
-    origin = {"default": "Localização padrão", "ip": "Sua localização",
+    origin = {"default": "Localização padrão", "gps": "Sua localização",
               "search": "Localização escolhida"}[loc["source"]]
     left, right = st.columns([3, 1.4], vertical_alignment="bottom")
     with left:
@@ -829,7 +843,7 @@ def main() -> None:
     # Mapa / ambiente / sistema
     m_col, e_col, s_col = st.columns([1.15, 1, 1])
     with m_col:
-        acc = (f"Precisão de ~{round(loc['accuracy'] / 1000)} km (IP)" if loc["accuracy"]
+        acc = (f"Precisão de ~{round(loc['accuracy'])} m (GPS)" if loc["accuracy"]
                else "Localização definida")
         components.html(map_html(loc, f"{loc['city']}, {loc['region']}", acc), height=300)
 
@@ -838,14 +852,16 @@ def main() -> None:
                               label_visibility="collapsed")
             b1, b2 = st.columns(2)
             search = b1.form_submit_button("🔎 Buscar cidade", use_container_width=True)
-            use_ip = b2.form_submit_button("📍 Minha localização", use_container_width=True)
+            use_gps = b2.form_submit_button("📍 Minha localização", use_container_width=True)
         if search and q.strip():
             ss.geo_results = search_city(q.strip())
             if not ss.geo_results:
                 st.caption("Nenhuma cidade encontrada.")
-        if use_ip:
-            request_location()
+        if use_gps:
+            ss.want_gps, ss.location_status = True, "waiting"
             st.rerun()
+        if ss.want_gps:
+            st.caption("Aguardando sua permissão de localização no navegador...")
         if ss.geo_results:
             st.selectbox(
                 "Resultados", range(len(ss.geo_results)), key="geo_choice", index=None,
@@ -854,7 +870,7 @@ def main() -> None:
                     x for x in (ss.geo_results[i]["name"], ss.geo_results[i].get("admin1"),
                                 ss.geo_results[i].get("country")) if x))
         if ss.location_status == "unavailable":
-            st.caption("Não foi possível obter sua localização pelo IP; mantendo a atual.")
+            st.caption("Não foi possível obter sua localização. Permita o acesso no navegador ou use a busca de cidade.")
 
     with e_col:
         env = build_environment(data) if data else None
