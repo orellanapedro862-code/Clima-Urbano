@@ -100,11 +100,12 @@ def hour_index(times: list[str], now_iso: str) -> int:
 # ----------------------------------------------------------------------------
 # APIs
 # ----------------------------------------------------------------------------
-def reverse_geocode(lat: float, lon: float) -> tuple[str, str] | None:
+def reverse_geocode(lat: float, lon: float) -> tuple[str, str, str] | None:
+    """(cidade, UF, endereço curto) via Nominatim, em pt-BR."""
     try:
         r = requests.get(
             "https://nominatim.openstreetmap.org/reverse",
-            params={"format": "json", "lat": lat, "lon": lon,
+            params={"format": "json", "lat": lat, "lon": lon, "zoom": 18,
                     "addressdetails": 1, "accept-language": "pt-BR"},
             headers={"User-Agent": "clima-urbano-python/2.0"}, timeout=10)
         if not r.ok:
@@ -114,7 +115,11 @@ def reverse_geocode(lat: float, lon: float) -> tuple[str, str] | None:
         if not city:
             return None
         iso = a.get("ISO3166-2-lvl4")
-        return city, (iso.split("-")[-1] if iso else a.get("state", ""))
+        region = iso.split("-")[-1] if iso else a.get("state", "")
+        road = a.get("road") or a.get("pedestrian") or a.get("footway") or ""
+        hood = a.get("suburb") or a.get("neighbourhood") or a.get("quarter") or ""
+        detail = ", ".join(x for x in (road, hood) if x)
+        return city, region, detail
     except Exception:
         return None
 
@@ -595,7 +600,7 @@ UI_BRIDGE = r"""
 """
 
 
-def map_html(loc: dict, place: str, acc: str) -> str:
+def map_html(loc: dict, place: str, acc: str, detail: str = "") -> str:
     lat, lon = loc["latitude"], loc["longitude"]
     bbox = f"{lon - 0.06}%2C{lat - 0.04}%2C{lon + 0.06}%2C{lat + 0.04}"
     src = (f"https://www.openstreetmap.org/export/embed.html?bbox={bbox}"
@@ -610,6 +615,7 @@ box-shadow:0 8px 28px rgb(0 0 0/10%);font-family:Manrope,system-ui,sans-serif">
   padding:12px 14px;box-shadow:0 4px 18px rgb(0 0 0/18%)">
     <div style="color:#26a37a;font-size:10px;font-weight:800;letter-spacing:.12em">LOCALIZAÇÃO</div>
     <div style="font-size:14px;font-weight:700;margin-top:4px;color:var(--ink)">{place}</div>
+    <div style="font-size:12px;color:var(--muted);margin-top:2px">{detail}</div>
     <div style="font-size:12px;color:var(--sub);margin-top:4px">{coordinates_label(lat, lon)}</div>
   </div>
   <div style="position:absolute;right:10px;bottom:24px;background:var(--card);border-radius:8px;
@@ -678,8 +684,8 @@ def init_state() -> None:
     ss.setdefault("period", "24h")
     ss.setdefault("dismissed_alert", None)
     ss.setdefault("location", dict(DEFAULT_LOCATION))
-    ss.setdefault("location_status", "idle")  # idle | active | unavailable
-    ss.setdefault("want_gps", False)
+    ss.setdefault("location_status", "waiting")  # waiting | active | unavailable
+    ss.setdefault("want_gps", True)  # pede a posição exata logo ao abrir
     ss.setdefault("just_refreshed", False)
     ss.setdefault("geo_results", [])
     ss.setdefault("data", None)
@@ -687,28 +693,36 @@ def init_state() -> None:
     ss.setdefault("next_refresh_at", time.time())
 
 
+GPS_JS = """new Promise((resolve) => {
+  if (!navigator.geolocation) { resolve({error: "sem suporte"}); return; }
+  navigator.geolocation.getCurrentPosition(
+    (p) => resolve({lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy}),
+    (e) => resolve({error: e.message || "negado"}),
+    {enableHighAccuracy: true, timeout: 20000, maximumAge: 0});
+})"""
+
+
 def process_gps() -> None:
-    """Pede ao navegador a posição real (GPS). Roda enquanto want_gps estiver ativo."""
+    """Pede ao navegador a posição exata (GPS, alta precisão). Roda enquanto want_gps estiver ativo."""
     ss = st.session_state
     try:
-        from streamlit_js_eval import get_geolocation
+        from streamlit_js_eval import streamlit_js_eval
     except ImportError:
         ss.want_gps, ss.location_status = False, "unavailable"
         return
-    res = get_geolocation()  # None enquanto o usuário não responde ao pedido de permissão
-    if not res:
+    res = streamlit_js_eval(js_expressions=GPS_JS, key="gps_request")
+    if not res:  # None enquanto o usuário não responde ao pedido de permissão
         return
     ss.want_gps = False
-    coords = res.get("coords") if isinstance(res, dict) else None
-    if not coords or coords.get("latitude") is None:
+    if not isinstance(res, dict) or res.get("lat") is None:
         ss.location_status = "unavailable"
         return
     loc = dict(ss.location)
-    loc.update(latitude=coords["latitude"], longitude=coords["longitude"],
-               accuracy=coords.get("accuracy"), source="gps")
+    loc.update(latitude=round(res["lat"], 5), longitude=round(res["lon"], 5),
+               accuracy=res.get("acc"), source="gps", detail="")
     place = reverse_geocode(loc["latitude"], loc["longitude"])
     if place:
-        loc["city"], loc["region"] = place[0], place[1] or loc["region"]
+        loc["city"], loc["region"], loc["detail"] = place[0], place[1] or loc["region"], place[2]
     ss.location, ss.location_status = loc, "active"
     st.rerun()
 
@@ -843,9 +857,12 @@ def main() -> None:
     # Mapa / ambiente / sistema
     m_col, e_col, s_col = st.columns([1.15, 1, 1])
     with m_col:
-        acc = (f"Precisão de ~{round(loc['accuracy'])} m (GPS)" if loc["accuracy"]
-               else "Localização definida")
-        components.html(map_html(loc, f"{loc['city']}, {loc['region']}", acc), height=300)
+        a_m = loc["accuracy"]
+        acc = ("Localização definida" if not a_m else
+               f"Precisão de ~{round(a_m)} m (GPS)" if a_m < 1000 else
+               f"Precisão de ~{a_m / 1000:.1f} km (estimada por Wi-Fi/rede)")
+        components.html(map_html(loc, f"{loc['city']}, {loc['region']}", acc,
+                                 loc.get("detail", "")), height=300)
 
         with st.form("geo_form", clear_on_submit=True, border=False):
             q = st.text_input("Buscar outra cidade", placeholder="Ex.: Campinas",
