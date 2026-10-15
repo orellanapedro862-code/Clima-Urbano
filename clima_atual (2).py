@@ -376,6 +376,14 @@ CSS = """
 --ic-coral:color-mix(in srgb,#e96c52 16%,transparent);--ic-blue:color-mix(in srgb,#4f93d8 16%,transparent);
 --ic-violet:color-mix(in srgb,#8f7ad0 16%,transparent);
 --shadow:0 1px 2px rgb(0 0 0/8%),0 8px 28px rgb(0 0 0/8%);}
+/* Modo claro: fundo branco, cartões brancos com borda suave */
+:root[data-theme="light"]{--ink:#14201b;--muted:#607068;--subtle:#8a9790;--line:#e2e8e3;
+--surface:#fff;--canvas:#f5f7f3;--topbar:#fff;--brand:#197657;--brand-soft:#e8f4ee;
+--blue:#4386ca;--violet:#826cc2;
+--al-line:#f5e1bd;--al-bg:#fdf7ed;--al-ink:#6c4511;--al-copy:#8b5d1b;
+--ok-line:#cfe8da;--ok-bg:#f1f9f4;--ok-ink:#14573f;--ok-copy:#2d7a5a;
+--ic-coral:#fcecea;--ic-blue:#ecf3fa;--ic-violet:#f0edf8;
+--shadow:0 1px 2px rgb(20 32 27/4%),0 8px 28px rgb(20 32 27/5%);}
 html,body,[data-testid="stAppViewContainer"],.stApp{font-family:"Manrope",sans-serif;}
 [data-testid="stHeader"]{background:transparent;}
 .block-container{max-width:80rem;padding-top:1rem;padding-bottom:3rem;}
@@ -515,6 +523,75 @@ def temperature_chart_html(hist: dict, period: str) -> str:
 </div>"""
 
 
+UI_BRIDGE = r"""
+<script>
+(function () {
+  try {
+    const P = window.parent, D = P.document;
+    if (P.__climaStop) P.__climaStop();
+
+    // ---- Tradução dos menus e diálogos do próprio Streamlit ----
+    const T = {
+      "Share": "Compartilhar", "Rerun": "Executar novamente", "Clear cache": "Limpar cache",
+      "Print": "Imprimir", "Record screen": "Gravar tela", "Stop recording": "Parar gravação",
+      "Settings": "Configurações", "System": "Sistema", "Light": "Claro", "Dark": "Escuro",
+      "Theme": "Tema", "Run on save": "Executar ao salvar", "Wide mode": "Modo amplo",
+      "Show app in wider layout": "Exibir o app em layout mais amplo",
+      "Automatically updates the app when the underlying code is updated":
+        "Atualiza o app automaticamente quando o código é alterado",
+      "Choose app theme, colors and fonts": "Escolha o tema, as cores e as fontes do app",
+      "Report a bug": "Relatar um erro", "Get help": "Obter ajuda", "About": "Sobre",
+      "Deploy": "Implantar", "Developer options": "Opções do desenvolvedor",
+      "Close": "Fechar", "Stop": "Parar", "Running...": "Executando...", "Source": "Código-fonte"
+    };
+    const ROOTS = '[data-testid="stHeader"], [data-testid="stToolbar"], [data-baseweb="popover"], ' +
+                  '[data-testid="stMainMenuPopover"], [role="dialog"], [role="menu"], [role="tooltip"]';
+    function translate() {
+      D.querySelectorAll(ROOTS).forEach(function (root) {
+        const w = D.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        const nodes = []; let n;
+        while ((n = w.nextNode())) nodes.push(n);
+        nodes.forEach(function (node) {
+          const raw = node.nodeValue, t = raw.trim();
+          if (!t) return;
+          let out = T[t];
+          if (!out && t.indexOf("Made with Streamlit") === 0) out = t.replace("Made with Streamlit", "Feito com Streamlit");
+          if (out && out !== t) node.nodeValue = raw.replace(t, out);
+        });
+        root.querySelectorAll("[aria-label],[title]").forEach(function (el) {
+          ["aria-label", "title"].forEach(function (a) {
+            const v = el.getAttribute(a);
+            if (v && T[v]) el.setAttribute(a, T[v]);
+          });
+        });
+      });
+    }
+
+    // ---- Tema real da página (claro/escuro) pela cor de fundo ----
+    function theme() {
+      const app = D.querySelector(".stApp") || D.body;
+      const m = P.getComputedStyle(app).backgroundColor.match(/[\d.]+/g);
+      if (!m) return;
+      const lum = 0.299 * m[0] + 0.587 * m[1] + 0.114 * m[2];
+      const v = lum < 128 ? "dark" : "light";
+      if (D.documentElement.getAttribute("data-theme") !== v) D.documentElement.setAttribute("data-theme", v);
+    }
+
+    let timer = null;
+    const mo = new MutationObserver(function () {
+      if (timer) return;
+      timer = setTimeout(function () { timer = null; translate(); theme(); }, 60);
+    });
+    mo.observe(D.body, { childList: true, subtree: true });
+    const iv = setInterval(theme, 700);
+    translate(); theme();
+    P.__climaStop = function () { mo.disconnect(); clearInterval(iv); };
+  } catch (e) {}
+})();
+</script>
+"""
+
+
 def map_html(loc: dict, place: str, acc: str) -> str:
     lat, lon = loc["latitude"], loc["longitude"]
     bbox = f"{lon - 0.06}%2C{lat - 0.04}%2C{lon + 0.06}%2C{lat + 0.04}"
@@ -643,6 +720,7 @@ def main() -> None:
     init_state()
     ss = st.session_state
     st.markdown(CSS, unsafe_allow_html=True)
+    components.html(UI_BRIDGE, height=0)
 
     if ss.location_status == "idle":
         request_location()
